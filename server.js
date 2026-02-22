@@ -105,7 +105,7 @@ app.get("/debug/env", (_req, res) => {
 app.get("/debug/onlineMeetings/:organizerUserId", async (req, res) => {
   try {
     const token = await getGraphToken();
-    const url = `https://graph.microsoft.com/v1.0/users/${req.params.organizerUserId}/onlineMeetings?$top=5`;
+    const url = `https://graph.microsoft.com/v1.0/users/${req.params.organizerUserId}/onlineMeetings`;
     const r = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } });
     res.json(r.data);
   } catch (e) {
