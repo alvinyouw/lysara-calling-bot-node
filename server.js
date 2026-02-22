@@ -4,6 +4,7 @@ import { ClientSecretCredential } from "@azure/identity";
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
+const BUILD_TAG = "2026-02-22-remove-top-v1";
 
 // ============================
 // ENV (Azure App Service -> Environment variables)
@@ -89,7 +90,7 @@ async function findOnlineMeeting({ token, organizerUserId, joinWebUrl }) {
 // ============================
 
 // Health
-app.get("/health", (_req, res) => res.json({ ok: true }));
+app.get("/health", (_req, res) => res.json({ ok: true, build: BUILD_TAG }));
 
 // Quick env sanity (remove later if you want)
 app.get("/debug/env", (_req, res) => {
