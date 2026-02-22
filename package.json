@@ -1,0 +1,14 @@
+{
+  "name": "lysara-calling-bot-node",
+  "version": "1.0.0",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@azure/identity": "^4.2.1",
+    "axios": "^1.6.8",
+    "express": "^4.19.2"
+  }
+}
