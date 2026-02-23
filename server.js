@@ -218,7 +218,8 @@ const payload = {
 
 // POST https://graph.microsoft.com/v1.0/communications/calls
 
-    const callResp = await axios.post(createCallUrl, payload, {
+const createCallUrl = "https://graph.microsoft.com/v1.0/communications/calls";    
+const callResp = await axios.post(createCallUrl, payload, {
       headers: {
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json"
