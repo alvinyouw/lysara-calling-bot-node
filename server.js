@@ -4,6 +4,16 @@ import { ClientSecretCredential } from "@azure/identity";
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
+function requireApiKey(req, res, next) {
+  const key = req.header("x-api-key");
+  if (!process.env.API_KEY) {
+    return res.status(500).json({ error: "API_KEY not configured on server" });
+  }
+  if (key !== process.env.API_KEY) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  next();
+}
 const BUILD_TAG = "2026-02-22-remove-top-v1";
 
 // ============================
@@ -137,7 +147,7 @@ app.post("/api/calling", (req, res) => {
  *  2) Extract chatInfo.threadId
  *  3) POST /communications/calls to join the scheduled meeting
  */
-app.post("/join", async (req, res) => {
+app.post("/join", requireApikey, async (req, res) => {
   try {
     let { joinWebUrl, organizerUserId } = req.body || {};
 
@@ -233,7 +243,7 @@ app.post("/join", async (req, res) => {
   }
 });
 
-app.get("/transcripts", async (req, res) => {
+app.get("/transcripts", requireApiKey, async (req, res) => {
   try {
     const joinWebUrl = req.query.joinWebUrl;
     if (!joinWebUrl) return res.status(400).json({ error: "Missing joinWebUrl query param" });
