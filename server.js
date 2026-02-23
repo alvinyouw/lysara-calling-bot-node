@@ -273,9 +273,12 @@ app.get("/transcripts", async (req, res) => {
     // Content endpoint returns VTT content
     const contentUrl = `https://graph.microsoft.com/v1.0/users/${organizerUserId}/onlineMeetings/${meetingId}/transcripts/${transcriptId}/content`;
     const contentResp = await axios.get(contentUrl, {
-      headers: { Authorization: `Bearer ${token}` },
-      responseType: "text"
-    });
+  headers: {
+    Authorization: `Bearer ${token}`,
+    Accept: "text/vtt"
+  },
+  responseType: "text"
+});
 
     res.setHeader("Content-Type", "text/vtt; charset=utf-8");
     return res.status(200).send(contentResp.data);
