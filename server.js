@@ -256,6 +256,26 @@ app.post("/call/:callId/hangup", requireApiKey, async (req, res) => {
   }
 });
 
+app.get("/call/:callId", requireApiKey, async (req, res) => {
+  try {
+    const token = await getGraphToken();
+    const url = `https://graph.microsoft.com/v1.0/communications/calls/${req.params.callId}`;
+    const r = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } });
+
+    res.json({
+      ok: true,
+      id: r.data?.id,
+      state: r.data?.state,
+      terminationReason: r.data?.terminationReason || null
+    });
+  } catch (e) {
+    // If call is already deleted/ended, Graph often returns 404
+    const status = e?.response?.status;
+    if (status === 404) return res.status(404).json({ ok: true, state: "not_found_or_ended" });
+    return res.status(500).json({ error: e?.response?.data || e.message });
+  }
+});
+
 app.get("/transcripts", requireApiKey, async (req, res) => {
   try {
     const joinWebUrl = req.query.joinWebUrl;
