@@ -233,6 +233,57 @@ app.post("/join", async (req, res) => {
   }
 });
 
+app.get("/transcripts", async (req, res) => {
+  try {
+    const joinWebUrl = req.query.joinWebUrl;
+    if (!joinWebUrl) return res.status(400).json({ error: "Missing joinWebUrl query param" });
+
+    // Extract organizer Oid from link
+    const organizerUserId = tryExtractOrganizerOid(joinWebUrl);
+    if (!organizerUserId) {
+      return res.status(400).json({ error: "Could not extract organizer Oid from joinWebUrl context" });
+    }
+
+    const token = await getGraphToken();
+
+    // Find online meeting (same helper used by /join)
+    const found = await findOnlineMeeting({ token, organizerUserId, joinWebUrl });
+    if (!found.meeting) {
+      return res.status(404).json({ error: "Online meeting not found", tried: found.tried, lookupError: found.error || null });
+    }
+
+    const meetingId = found.meeting.id;
+
+    // 1) List transcripts
+    const listUrl = `https://graph.microsoft.com/v1.0/users/${organizerUserId}/onlineMeetings/${meetingId}/transcripts`;
+    const listResp = await axios.get(listUrl, { headers: { Authorization: `Bearer ${token}` } });
+
+    const transcripts = listResp.data?.value || [];
+    if (!transcripts.length) {
+      return res.status(404).json({
+        error: "No transcripts found yet. Usually means transcription wasn't started or it's not processed yet.",
+        meetingId
+      });
+    }
+
+    // 2) Get transcript content for the newest transcript
+    const latest = transcripts.sort((a, b) => (a.createdDateTime || "").localeCompare(b.createdDateTime || "")).pop();
+    const transcriptId = latest.id;
+
+    // Content endpoint returns VTT content
+    const contentUrl = `https://graph.microsoft.com/v1.0/users/${organizerUserId}/onlineMeetings/${meetingId}/transcripts/${transcriptId}/content`;
+    const contentResp = await axios.get(contentUrl, {
+      headers: { Authorization: `Bearer ${token}` },
+      responseType: "text"
+    });
+
+    res.setHeader("Content-Type", "text/vtt; charset=utf-8");
+    return res.status(200).send(contentResp.data);
+  } catch (e) {
+    return res.status(500).json({ error: e?.response?.data || e.message });
+  }
+});
+
 // ============================
 // Start server
 // ============================
