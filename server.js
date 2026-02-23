@@ -191,35 +191,32 @@ app.post("/join", requireApiKey, async (req, res) => {
       });
     }
 
-    // 2) Create call to join meeting
-    const createCallUrl = "https://graph.microsoft.com/v1.0/communications/calls";
+    // after you have found.meeting successfully:
+const joinMeetingId = found.meeting?.joinMeetingIdSettings?.joinMeetingId;
+const passcode = found.meeting?.joinMeetingIdSettings?.passcode ?? null;
 
-    const payload = {
-      "@odata.type": "#microsoft.graph.call",
-      callbackUri: CALLING_CALLBACK_URI,
-      requestedModalities: ["audio"],
-      mediaConfig: {
-        "@odata.type": "#microsoft.graph.serviceHostedMediaConfig"
-      },
-      chatInfo: {
-        "@odata.type": "#microsoft.graph.chatInfo",
-        threadId: threadId,
-        messageId: "0"
-      },
-      meetingInfo: {
-        "@odata.type": "#microsoft.graph.organizerMeetingInfo",
-        organizer: {
-          "@odata.type": "#microsoft.graph.identitySet",
-          user: {
-            "@odata.type": "#microsoft.graph.identity",
-            id: organizerUserId,
-            tenantId: TENANT_ID
-          }
-        },
-        allowConversationWithoutHost: true
-      },
-      tenantId: TENANT_ID
-    };
+if (!joinMeetingId) {
+  return res.status(400).json({
+    error: "joinMeetingIdSettings.joinMeetingId is missing from onlineMeeting. Cannot join via joinMeetingIdMeetingInfo."
+  });
+}
+
+const payload = {
+  "@odata.type": "#microsoft.graph.call",
+  callbackUri: CALLING_CALLBACK_URI,
+  requestedModalities: ["audio"],
+  mediaConfig: {
+    "@odata.type": "#microsoft.graph.serviceHostedMediaConfig"
+  },
+  meetingInfo: {
+    "@odata.type": "#microsoft.graph.joinMeetingIdMeetingInfo",
+    joinMeetingId: joinMeetingId,
+    passcode: passcode // can be null if not required
+  },
+  tenantId: TENANT_ID
+};
+
+// POST https://graph.microsoft.com/v1.0/communications/calls
 
     const callResp = await axios.post(createCallUrl, payload, {
       headers: {
