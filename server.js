@@ -147,7 +147,7 @@ app.post("/api/calling", (req, res) => {
  *  2) Extract chatInfo.threadId
  *  3) POST /communications/calls to join the scheduled meeting
  */
-app.post("/join", requireApikey, async (req, res) => {
+app.post("/join", requireApiKey, async (req, res) => {
   try {
     let { joinWebUrl, organizerUserId } = req.body || {};
 
