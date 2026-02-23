@@ -241,6 +241,21 @@ const callResp = await axios.post(createCallUrl, payload, {
   }
 });
 
+app.post("/call/:callId/hangup", requireApiKey, async (req, res) => {
+  try {
+    const token = await getGraphToken();
+    const url = `https://graph.microsoft.com/v1.0/communications/calls/${req.params.callId}`;
+
+    await axios.delete(url, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+
+    res.json({ ok: true, callId: req.params.callId });
+  } catch (e) {
+    res.status(500).json({ error: e?.response?.data || e.message });
+  }
+});
+
 app.get("/transcripts", requireApiKey, async (req, res) => {
   try {
     const joinWebUrl = req.query.joinWebUrl;
