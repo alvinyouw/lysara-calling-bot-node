@@ -2,6 +2,7 @@ import express from "express";
 import axios from "axios";
 import { ClientSecretCredential } from "@azure/identity";
 
+const activeCallsByThreadId = new Map(); // threadId -> callId
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 function requireApiKey(req, res, next) {
@@ -189,7 +190,13 @@ app.post("/join", requireApiKey, async (req, res) => {
           "Online meeting found, but chatInfo.threadId is missing. Cannot join scheduled meeting without threadId.",
         meetingId: found.meeting?.id
       });
-    }
+      if (activeCallsByThreadId.has(threadId)) {
+  return res.status(409).json({
+    error: "Bot already joined this meeting",
+    callId: activeCallsByThreadId.get(threadId)
+  });
+}
+    
 
     // after you have found.meeting successfully:
 const joinMeetingId = found.meeting?.joinMeetingIdSettings?.joinMeetingId;
@@ -225,6 +232,8 @@ const callResp = await axios.post(createCallUrl, payload, {
         "Content-Type": "application/json"
       }
     });
+
+    activeCallsByThreadId.set(threadId, callResp.data.id);
 
     return res.status(200).json({
       ok: true,
