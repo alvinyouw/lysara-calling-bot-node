@@ -2,9 +2,13 @@ import express from "express";
 import axios from "axios";
 import { ClientSecretCredential } from "@azure/identity";
 
-const activeCallsByThreadId = new Map(); // threadId -> callId
 const app = express();
 app.use(express.json({ limit: "2mb" }));
+
+// ===== Duplicate-join guard (in-memory) =====
+const activeCallsByThreadId = new Map(); // threadId -> callId
+
+// ===== API key protection for your own endpoints =====
 function requireApiKey(req, res, next) {
   const key = req.header("x-api-key");
   if (!process.env.API_KEY) {
@@ -15,23 +19,20 @@ function requireApiKey(req, res, next) {
   }
   next();
 }
-const BUILD_TAG = "2026-02-22-remove-top-v1";
 
-// ============================
-// ENV (Azure App Service -> Environment variables)
-// ============================
+const BUILD_TAG = "2026-02-24-clean";
+
+// ===== ENV (Azure App Service -> Environment variables) =====
 const TENANT_ID = process.env.TENANT_ID; // GUID
 const CLIENT_ID = process.env.MICROSOFT_APP_ID; // App registration (client) ID
 const CLIENT_SECRET = process.env.MICROSOFT_APP_PASSWORD; // Client secret VALUE
 
-// Must match what you set in Azure Bot -> Teams channel -> Calling webhook
+// Must match Azure Bot -> Teams channel -> Calling webhook
 const CALLING_CALLBACK_URI =
   process.env.CALLING_CALLBACK_URI ||
   "https://lysara-e3e2f0dydffnfefs.southeastasia-01.azurewebsites.net/api/calling";
 
-// ============================
-// Startup warning if env missing
-// ============================
+// ===== Startup warning if env missing =====
 (function assertEnv() {
   const missing = [];
   if (!TENANT_ID) missing.push("TENANT_ID");
@@ -40,30 +41,24 @@ const CALLING_CALLBACK_URI =
 
   if (missing.length) {
     console.warn(
-      `[WARN] Missing env vars: ${missing.join(", ")}. /join will fail until set.`
+      `[WARN] Missing env vars: ${missing.join(", ")}. /join & /transcripts will fail until set.`
     );
   }
 })();
 
-// ============================
-// Helpers
-// ============================
+// ===== Helpers =====
 async function getGraphToken() {
   const cred = new ClientSecretCredential(TENANT_ID, CLIENT_ID, CLIENT_SECRET);
   const token = await cred.getToken("https://graph.microsoft.com/.default");
   return token.token;
 }
 
-/**
- * Extract Oid (organizer AAD object id) from Teams join URL context param.
- * Example context: {"Tid":"...","Oid":"..."}
- */
+// Extract organizer Oid from Teams join URL `context` param: {"Tid":"...","Oid":"..."}
 function tryExtractOrganizerOid(joinWebUrl) {
   try {
     const u = new URL(joinWebUrl);
     const contextParam = u.searchParams.get("context");
     if (!contextParam) return null;
-
     const ctx = JSON.parse(decodeURIComponent(contextParam));
     return ctx?.Oid || null;
   } catch {
@@ -71,15 +66,9 @@ function tryExtractOrganizerOid(joinWebUrl) {
   }
 }
 
-/**
- * Graph lookup for onlineMeeting by JoinWebUrl (must be URL-encoded as per docs).
- * We query:
- * GET /users/{organizerUserId}/onlineMeetings?$filter=JoinWebUrl eq '{encodedJoinWebUrl}'
- */
+// Find onlineMeeting by JoinWebUrl (Graph expects URL-encoded joinWebUrl in filter)
 async function findOnlineMeeting({ token, organizerUserId, joinWebUrl }) {
-  // Graph expects the joinWebUrl value to be URL encoded inside the filter
   const encodedJoinWebUrl = encodeURIComponent(joinWebUrl);
-
   const url =
     `https://graph.microsoft.com/v1.0/users/${organizerUserId}/onlineMeetings` +
     `?$filter=JoinWebUrl%20eq%20'${encodedJoinWebUrl}'`;
@@ -88,7 +77,6 @@ async function findOnlineMeeting({ token, organizerUserId, joinWebUrl }) {
     const resp = await axios.get(url, {
       headers: { Authorization: `Bearer ${token}` }
     });
-
     const meeting = resp.data?.value?.[0] || null;
     return { meeting, tried: url };
   } catch (e) {
@@ -96,14 +84,16 @@ async function findOnlineMeeting({ token, organizerUserId, joinWebUrl }) {
   }
 }
 
-// ============================
-// Routes
-// ============================
+function isGuid(s) {
+  return /^[0-9a-fA-F-]{36}$/.test(String(s || ""));
+}
+
+// ===== Routes =====
 
 // Health
 app.get("/health", (_req, res) => res.json({ ok: true, build: BUILD_TAG }));
 
-// Quick env sanity (remove later if you want)
+// Debug env (optional)
 app.get("/debug/env", (_req, res) => {
   res.json({
     TENANT_ID: TENANT_ID || null,
@@ -113,24 +103,10 @@ app.get("/debug/env", (_req, res) => {
   });
 });
 
-// (Optional) quick check Graph can list meetings for a user (for diagnosing policy issues)
-app.get("/debug/onlineMeetings/:organizerUserId", async (req, res) => {
-  try {
-    const token = await getGraphToken();
-    const url = `https://graph.microsoft.com/v1.0/users/${req.params.organizerUserId}/onlineMeetings`;
-    const r = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } });
-    res.json(r.data);
-  } catch (e) {
-    res.status(500).json({ error: e?.response?.data || e.message });
-  }
-});
+// Bot Framework messaging endpoint (leave unprotected)
+app.post("/api/messages", (_req, res) => res.sendStatus(200));
 
-// Bot Framework messaging endpoint (Azure Bot -> Messaging endpoint)
-app.post("/api/messages", (_req, res) => {
-  res.sendStatus(200);
-});
-
-// Calling webhook endpoint (Azure Bot -> Teams channel -> Calling webhook)
+// Calling webhook endpoint (leave unprotected)
 app.post("/api/calling", (req, res) => {
   console.log("=== CALLING WEBHOOK EVENT RECEIVED ===");
   console.log(JSON.stringify(req.body, null, 2));
@@ -138,61 +114,40 @@ app.post("/api/calling", (req, res) => {
 });
 
 /**
- * POST /join
- * Body:
- *  - joinWebUrl (required)
- *  - organizerUserId (optional; if omitted, we try to parse Oid from joinWebUrl context)
- *
- * This will:
- *  1) Find the onlineMeeting via JoinWebUrl filter
- *  2) Extract chatInfo.threadId
- *  3) POST /communications/calls to join the scheduled meeting
+ * POST /join (protected)
+ * Body: { joinWebUrl }
+ * - Extract organizer Oid from link
+ * - Find meeting via Graph onlineMeetings filter
+ * - Guard: don't join twice for same threadId
+ * - Join via joinMeetingIdMeetingInfo if available (guest/lobby style)
+ * - else fallback to organizerMeetingInfo join
  */
 app.post("/join", requireApiKey, async (req, res) => {
   try {
-    let { joinWebUrl } = req.body || {};
+    const { joinWebUrl } = req.body || {};
     if (!joinWebUrl) {
       return res.status(400).json({ error: "Missing joinWebUrl (Teams meeting join link)." });
     }
 
-    // Extract organizer Oid from the join link context
     const organizerUserId = tryExtractOrganizerOid(joinWebUrl);
     if (!organizerUserId) {
       return res.status(400).json({
-        error: "Missing organizerUserId and could not extract Oid from joinWebUrl context. Provide organizerUserId explicitly."
+        error: "Could not extract organizer Oid from joinWebUrl context."
       });
     }
 
     const token = await getGraphToken();
 
-    // Find the online meeting
     const found = await findOnlineMeeting({ token, organizerUserId, joinWebUrl });
     if (!found.meeting) {
       return res.status(404).json({
-        error: "Online meeting not found for this organizerUserId + joinWebUrl.",
+        error: "Online meeting not found for organizerUserId + joinWebUrl.",
         tried: [found.tried],
         lookupError: found.error || null,
         organizerUserIdUsed: organizerUserId
       });
     }
 
-    const threadId = found.meeting?.chatInfo?.threadId;
-if (!threadId) {
-  return res.status(400).json({
-    error:
-      "Online meeting found, but chatInfo.threadId is missing. Cannot join scheduled meeting without threadId.",
-    meetingId: found.meeting?.id
-  });
-}
-
-if (activeCallsByThreadId.has(threadId)) {
-  return res.status(409).json({
-    error: "Bot already joined this meeting",
-    callId: activeCallsByThreadId.get(threadId)
-  });
-}
-
-    // ThreadId is required for duplicate-join guard + older join mode
     const threadId = found.meeting?.chatInfo?.threadId;
     if (!threadId) {
       return res.status(400).json({
@@ -201,7 +156,7 @@ if (activeCallsByThreadId.has(threadId)) {
       });
     }
 
-    // ✅ Duplicate join guard
+    // Duplicate join guard
     if (activeCallsByThreadId.has(threadId)) {
       return res.status(409).json({
         error: "Bot already joined this meeting",
@@ -210,7 +165,6 @@ if (activeCallsByThreadId.has(threadId)) {
       });
     }
 
-    // Prefer guest-style joinMeetingIdMeetingInfo when available
     const joinMeetingId = found.meeting?.joinMeetingIdSettings?.joinMeetingId;
     const passcode = found.meeting?.joinMeetingIdSettings?.passcode ?? null;
 
@@ -218,6 +172,7 @@ if (activeCallsByThreadId.has(threadId)) {
 
     let payload;
     if (joinMeetingId) {
+      // Guest/lobby-style join (you already tested this works)
       payload = {
         "@odata.type": "#microsoft.graph.call",
         callbackUri: CALLING_CALLBACK_URI,
@@ -231,7 +186,7 @@ if (activeCallsByThreadId.has(threadId)) {
         tenantId: TENANT_ID
       };
     } else {
-      // Fallback: organizer meeting info method (older but works)
+      // Fallback scheduled meeting join
       payload = {
         "@odata.type": "#microsoft.graph.call",
         callbackUri: CALLING_CALLBACK_URI,
@@ -254,61 +209,7 @@ if (activeCallsByThreadId.has(threadId)) {
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
     });
 
-    // ✅ Store callId so the next /join is blocked
-    activeCallsByThreadId.set(threadId, callResp.data.id);
-
-    return res.status(200).json({
-      ok: true,
-      organizerUserIdUsed: organizerUserId,
-      meeting: {
-        id: found.meeting?.id,
-        subject: found.meeting?.subject || null,
-        threadId
-      },
-      call: callResp.data
-    });
-  } catch (e) {
-    return res.status(500).json({ error: e?.response?.data || e.message });
-  }
-});
-}
-    
-
-    // after you have found.meeting successfully:
-const joinMeetingId = found.meeting?.joinMeetingIdSettings?.joinMeetingId;
-const passcode = found.meeting?.joinMeetingIdSettings?.passcode ?? null;
-
-if (!joinMeetingId) {
-  return res.status(400).json({
-    error: "joinMeetingIdSettings.joinMeetingId is missing from onlineMeeting. Cannot join via joinMeetingIdMeetingInfo."
-  });
-
-
-const payload = {
-  "@odata.type": "#microsoft.graph.call",
-  callbackUri: CALLING_CALLBACK_URI,
-  requestedModalities: ["audio"],
-  mediaConfig: {
-    "@odata.type": "#microsoft.graph.serviceHostedMediaConfig"
-  },
-  meetingInfo: {
-    "@odata.type": "#microsoft.graph.joinMeetingIdMeetingInfo",
-    joinMeetingId: joinMeetingId,
-    passcode: passcode // can be null if not required
-  },
-  tenantId: TENANT_ID
-};
-
-// POST https://graph.microsoft.com/v1.0/communications/calls
-
-const createCallUrl = "https://graph.microsoft.com/v1.0/communications/calls";    
-const callResp = await axios.post(createCallUrl, payload, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json"
-      }
-    });
-
+    // Store callId to prevent duplicate joins
     activeCallsByThreadId.set(threadId, callResp.data.id);
 
     return res.status(200).json({
@@ -326,47 +227,64 @@ const callResp = await axios.post(createCallUrl, payload, {
   }
 });
 
+// Hang up call (protected)
 app.post("/call/:callId/hangup", requireApiKey, async (req, res) => {
   try {
+    const callId = req.params.callId;
+    if (!isGuid(callId)) {
+      return res.status(400).json({ error: "callId must be a GUID" });
+    }
+
     const token = await getGraphToken();
-    const url = `https://graph.microsoft.com/v1.0/communications/calls/${req.params.callId}`;
+    const url = `https://graph.microsoft.com/v1.0/communications/calls/${callId}`;
 
-    await axios.delete(url, {
-      headers: { Authorization: `Bearer ${token}` }
-    });
+    await axios.delete(url, { headers: { Authorization: `Bearer ${token}` } });
 
-    res.json({ ok: true, callId: req.params.callId });
+    // Remove from map if present
+    for (const [tId, cId] of activeCallsByThreadId.entries()) {
+      if (cId === callId) {
+        activeCallsByThreadId.delete(tId);
+        break;
+      }
+    }
+
+    return res.json({ ok: true, callId });
   } catch (e) {
-    res.status(500).json({ error: e?.response?.data || e.message });
+    return res.status(500).json({ error: e?.response?.data || e.message });
   }
 });
 
+// Check call state (protected)
 app.get("/call/:callId", requireApiKey, async (req, res) => {
   try {
+    const callId = req.params.callId;
+    if (!isGuid(callId)) {
+      return res.status(400).json({ error: "callId must be a GUID" });
+    }
+
     const token = await getGraphToken();
-    const url = `https://graph.microsoft.com/v1.0/communications/calls/${req.params.callId}`;
+    const url = `https://graph.microsoft.com/v1.0/communications/calls/${callId}`;
     const r = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } });
 
-    res.json({
+    return res.json({
       ok: true,
       id: r.data?.id,
       state: r.data?.state,
       terminationReason: r.data?.terminationReason || null
     });
   } catch (e) {
-    // If call is already deleted/ended, Graph often returns 404
     const status = e?.response?.status;
     if (status === 404) return res.status(404).json({ ok: true, state: "not_found_or_ended" });
     return res.status(500).json({ error: e?.response?.data || e.message });
   }
 });
 
+// Fetch transcript as VTT (protected)
 app.get("/transcripts", requireApiKey, async (req, res) => {
   try {
     const joinWebUrl = req.query.joinWebUrl;
     if (!joinWebUrl) return res.status(400).json({ error: "Missing joinWebUrl query param" });
 
-    // Extract organizer Oid from link
     const organizerUserId = tryExtractOrganizerOid(joinWebUrl);
     if (!organizerUserId) {
       return res.status(400).json({ error: "Could not extract organizer Oid from joinWebUrl context" });
@@ -374,39 +292,46 @@ app.get("/transcripts", requireApiKey, async (req, res) => {
 
     const token = await getGraphToken();
 
-    // Find online meeting (same helper used by /join)
     const found = await findOnlineMeeting({ token, organizerUserId, joinWebUrl });
     if (!found.meeting) {
-      return res.status(404).json({ error: "Online meeting not found", tried: found.tried, lookupError: found.error || null });
+      return res.status(404).json({
+        error: "Online meeting not found",
+        tried: found.tried,
+        lookupError: found.error || null
+      });
     }
 
     const meetingId = found.meeting.id;
 
-    // 1) List transcripts
+    // List transcripts
     const listUrl = `https://graph.microsoft.com/v1.0/users/${organizerUserId}/onlineMeetings/${meetingId}/transcripts`;
     const listResp = await axios.get(listUrl, { headers: { Authorization: `Bearer ${token}` } });
 
     const transcripts = listResp.data?.value || [];
     if (!transcripts.length) {
       return res.status(404).json({
-        error: "No transcripts found yet. Usually means transcription wasn't started or it's not processed yet.",
+        error: "No transcripts found yet. Transcription may not be started or still processing.",
         meetingId
       });
     }
 
-    // 2) Get transcript content for the newest transcript
-    const latest = transcripts.sort((a, b) => (a.createdDateTime || "").localeCompare(b.createdDateTime || "")).pop();
+    // Get latest transcript
+    const latest = transcripts
+      .sort((a, b) => (a.createdDateTime || "").localeCompare(b.createdDateTime || ""))
+      .pop();
+
     const transcriptId = latest.id;
 
-    // Content endpoint returns VTT content
+    // Get transcript content (VTT)
     const contentUrl = `https://graph.microsoft.com/v1.0/users/${organizerUserId}/onlineMeetings/${meetingId}/transcripts/${transcriptId}/content`;
+
     const contentResp = await axios.get(contentUrl, {
-  headers: {
-    Authorization: `Bearer ${token}`,
-    Accept: "text/vtt"
-  },
-  responseType: "text"
-});
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "text/vtt"
+      },
+      responseType: "text"
+    });
 
     res.setHeader("Content-Type", "text/vtt; charset=utf-8");
     return res.status(200).send(contentResp.data);
@@ -415,8 +340,6 @@ app.get("/transcripts", requireApiKey, async (req, res) => {
   }
 });
 
-// ============================
-// Start server
-// ============================
+// ===== Start server =====
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server listening on ${PORT}`));
