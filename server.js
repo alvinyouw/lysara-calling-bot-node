@@ -176,6 +176,22 @@ app.post("/join", requireApiKey, async (req, res) => {
       });
     }
 
+    const threadId = found.meeting?.chatInfo?.threadId;
+if (!threadId) {
+  return res.status(400).json({
+    error:
+      "Online meeting found, but chatInfo.threadId is missing. Cannot join scheduled meeting without threadId.",
+    meetingId: found.meeting?.id
+  });
+}
+
+if (activeCallsByThreadId.has(threadId)) {
+  return res.status(409).json({
+    error: "Bot already joined this meeting",
+    callId: activeCallsByThreadId.get(threadId)
+  });
+}
+
     // ThreadId is required for duplicate-join guard + older join mode
     const threadId = found.meeting?.chatInfo?.threadId;
     if (!threadId) {
@@ -255,21 +271,6 @@ app.post("/join", requireApiKey, async (req, res) => {
     return res.status(500).json({ error: e?.response?.data || e.message });
   }
 });
-
-const threadId = found.meeting?.chatInfo?.threadId;
-if (!threadId) {
-  return res.status(400).json({
-    error:
-      "Online meeting found, but chatInfo.threadId is missing. Cannot join scheduled meeting without threadId.",
-    meetingId: found.meeting?.id
-  });
-}
-
-if (activeCallsByThreadId.has(threadId)) {
-  return res.status(409).json({
-    error: "Bot already joined this meeting",
-    callId: activeCallsByThreadId.get(threadId)
-  });
 }
     
 
@@ -281,7 +282,7 @@ if (!joinMeetingId) {
   return res.status(400).json({
     error: "joinMeetingIdSettings.joinMeetingId is missing from onlineMeeting. Cannot join via joinMeetingIdMeetingInfo."
   });
-}
+
 
 const payload = {
   "@odata.type": "#microsoft.graph.call",
