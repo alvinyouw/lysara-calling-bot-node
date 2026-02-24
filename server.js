@@ -257,13 +257,16 @@ app.post("/join", requireApiKey, async (req, res) => {
 });
 
     const threadId = found.meeting?.chatInfo?.threadId;
-    if (!threadId) {
-      return res.status(400).json({
-        error:
-          "Online meeting found, but chatInfo.threadId is missing. Cannot join scheduled meeting without threadId.",
-        meetingId: found.meeting?.id
-      });
-      if (activeCallsByThreadId.has(threadId)) {
+if (!threadId) {
+  return res.status(400).json({
+    error:
+      "Online meeting found, but chatInfo.threadId is missing. Cannot join scheduled meeting without threadId.",
+    meetingId: found.meeting?.id
+  });
+}
+
+// ✅ Duplicate join guard (must be OUTSIDE the threadId-missing block)
+if (activeCallsByThreadId.has(threadId)) {
   return res.status(409).json({
     error: "Bot already joined this meeting",
     callId: activeCallsByThreadId.get(threadId)
