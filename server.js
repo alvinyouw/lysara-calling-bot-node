@@ -150,38 +150,111 @@ app.post("/api/calling", (req, res) => {
  */
 app.post("/join", requireApiKey, async (req, res) => {
   try {
-    let { joinWebUrl, organizerUserId } = req.body || {};
-
+    let { joinWebUrl } = req.body || {};
     if (!joinWebUrl) {
       return res.status(400).json({ error: "Missing joinWebUrl (Teams meeting join link)." });
     }
 
-    // If organizerUserId not provided, try to extract from join link (Oid)
-    if (!organizerUserId) {
-      organizerUserId = tryExtractOrganizerOid(joinWebUrl);
-    }
-
+    // Extract organizer Oid from the join link context
+    const organizerUserId = tryExtractOrganizerOid(joinWebUrl);
     if (!organizerUserId) {
       return res.status(400).json({
-        error:
-          "Missing organizerUserId and could not extract Oid from joinWebUrl context. Provide organizerUserId explicitly."
+        error: "Missing organizerUserId and could not extract Oid from joinWebUrl context. Provide organizerUserId explicitly."
       });
     }
 
     const token = await getGraphToken();
 
-    // 1) Look up onlineMeeting
+    // Find the online meeting
     const found = await findOnlineMeeting({ token, organizerUserId, joinWebUrl });
-
     if (!found.meeting) {
       return res.status(404).json({
-        error:
-          "Online meeting not found for this organizerUserId + joinWebUrl. Common causes: organizerUserId not correct, the meeting isn't under this organizer, or app access policy/admin consent not applied.",
+        error: "Online meeting not found for this organizerUserId + joinWebUrl.",
         tried: [found.tried],
         lookupError: found.error || null,
         organizerUserIdUsed: organizerUserId
       });
     }
+
+    // ThreadId is required for duplicate-join guard + older join mode
+    const threadId = found.meeting?.chatInfo?.threadId;
+    if (!threadId) {
+      return res.status(400).json({
+        error: "Online meeting found, but chatInfo.threadId is missing.",
+        meetingId: found.meeting?.id
+      });
+    }
+
+    // ✅ Duplicate join guard
+    if (activeCallsByThreadId.has(threadId)) {
+      return res.status(409).json({
+        error: "Bot already joined this meeting",
+        callId: activeCallsByThreadId.get(threadId),
+        threadId
+      });
+    }
+
+    // Prefer guest-style joinMeetingIdMeetingInfo when available
+    const joinMeetingId = found.meeting?.joinMeetingIdSettings?.joinMeetingId;
+    const passcode = found.meeting?.joinMeetingIdSettings?.passcode ?? null;
+
+    const createCallUrl = "https://graph.microsoft.com/v1.0/communications/calls";
+
+    let payload;
+    if (joinMeetingId) {
+      payload = {
+        "@odata.type": "#microsoft.graph.call",
+        callbackUri: CALLING_CALLBACK_URI,
+        requestedModalities: ["audio"],
+        mediaConfig: { "@odata.type": "#microsoft.graph.serviceHostedMediaConfig" },
+        meetingInfo: {
+          "@odata.type": "#microsoft.graph.joinMeetingIdMeetingInfo",
+          joinMeetingId,
+          passcode
+        },
+        tenantId: TENANT_ID
+      };
+    } else {
+      // Fallback: organizer meeting info method (older but works)
+      payload = {
+        "@odata.type": "#microsoft.graph.call",
+        callbackUri: CALLING_CALLBACK_URI,
+        requestedModalities: ["audio"],
+        mediaConfig: { "@odata.type": "#microsoft.graph.serviceHostedMediaConfig" },
+        chatInfo: { "@odata.type": "#microsoft.graph.chatInfo", threadId, messageId: "0" },
+        meetingInfo: {
+          "@odata.type": "#microsoft.graph.organizerMeetingInfo",
+          organizer: {
+            "@odata.type": "#microsoft.graph.identitySet",
+            user: { "@odata.type": "#microsoft.graph.identity", id: organizerUserId, tenantId: TENANT_ID }
+          },
+          allowConversationWithoutHost: true
+        },
+        tenantId: TENANT_ID
+      };
+    }
+
+    const callResp = await axios.post(createCallUrl, payload, {
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+    });
+
+    // ✅ Store callId so the next /join is blocked
+    activeCallsByThreadId.set(threadId, callResp.data.id);
+
+    return res.status(200).json({
+      ok: true,
+      organizerUserIdUsed: organizerUserId,
+      meeting: {
+        id: found.meeting?.id,
+        subject: found.meeting?.subject || null,
+        threadId
+      },
+      call: callResp.data
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.response?.data || e.message });
+  }
+});
 
     const threadId = found.meeting?.chatInfo?.threadId;
     if (!threadId) {
