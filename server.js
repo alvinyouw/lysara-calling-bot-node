@@ -137,6 +137,14 @@ app.get("/debug/env", (_req, res) => {
 app.post("/api/messages", (_req, res) => res.sendStatus(200));
 
 app.post("/api/calling", async (req, res) => {
+  const notifs = req.body?.value || [];
+  for (const n of notifs) {
+    console.log(`[webhook] changeType=${n.changeType} resourceUrl=${n.resourceUrl}`);
+  }
+  console.log("=== CALLING WEBHOOK EVENT RECEIVED ===");
+  console.log(JSON.stringify(req.body, null, 2));
+  res.sendStatus(202);
+});
   try {
     // Always ACK fast
     res.sendStatus(202);
