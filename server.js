@@ -146,6 +146,10 @@ app.post("/api/calling", async (req, res) => {
     if (!Array.isArray(notifications) || notifications.length === 0) return;
 
     for (const n of notifications) {
+      console.log(`[webhook] changeType=${n.changeType} resourceUrl=${n.resourceUrl}`);
+    }
+
+    for (const n of notifications) {
       const callId = getCallIdFromNotification(n);
       if (!callId) continue;
 
