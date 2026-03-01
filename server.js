@@ -137,40 +137,32 @@ app.get("/debug/env", (_req, res) => {
 app.post("/api/messages", (_req, res) => res.sendStatus(200));
 
 app.post("/api/calling", async (req, res) => {
-  const notifs = req.body?.value || [];
-  for (const n of notifs) {
-    console.log(`[webhook] changeType=${n.changeType} resourceUrl=${n.resourceUrl}`);
-  }
-  console.log("=== CALLING WEBHOOK EVENT RECEIVED ===");
-  console.log(JSON.stringify(req.body, null, 2));
+  // Always ACK fast (Graph expects quick response)
   res.sendStatus(202);
-});
-  try {
-    // Always ACK fast
-    res.sendStatus(202);
 
-    const body = req.body;
-    const notifications = body?.value || [];
+  try {
+    const notifications = req.body?.value || [];
     if (!Array.isArray(notifications) || notifications.length === 0) return;
 
+    // Log short summary lines (easy to filter in Log Stream)
     for (const n of notifications) {
       console.log(`[webhook] changeType=${n.changeType} resourceUrl=${n.resourceUrl}`);
     }
 
+    // Process notifications
     for (const n of notifications) {
       const callId = getCallIdFromNotification(n);
       if (!callId) continue;
 
-      // 1) Call deleted/terminated -> cleanup
       const changeType = n?.changeType;
       const resourceUrl = n?.resourceUrl || "";
 
-      // If the call ends, clear trackers
-      if (changeType === "deleted" || (n?.resourceData?.state === "terminated")) {
+      // 1) Call deleted/terminated -> cleanup
+      if (changeType === "deleted" || n?.resourceData?.state === "terminated") {
         console.log(`[call] ended callId=${callId} changeType=${changeType}`);
         callState.delete(callId);
 
-        // also remove from activeCallsByThreadId if it points to this callId
+        // Remove from activeCallsByThreadId if it points to this callId
         for (const [tId, cId] of activeCallsByThreadId.entries()) {
           if (cId === callId) {
             activeCallsByThreadId.delete(tId);
@@ -183,17 +175,14 @@ app.post("/api/calling", async (req, res) => {
       // 2) Participants updates
       if (resourceUrl.endsWith("/participants") && Array.isArray(n?.resourceData)) {
         const participants = n.resourceData;
-
         const nonBotCount = countNonBotParticipants(participants);
 
-        // Init state
         const state =
           callState.get(callId) ||
           { lastNonBotCount: null, emptySince: null, hangupTimer: null };
 
         state.lastNonBotCount = nonBotCount;
 
-        // If no humans left -> start countdown (avoid flapping)
         if (nonBotCount === 0) {
           if (!state.emptySince) {
             state.emptySince = Date.now();
@@ -203,7 +192,6 @@ app.post("/api/calling", async (req, res) => {
           if (!state.hangupTimer) {
             state.hangupTimer = setTimeout(async () => {
               try {
-                // Re-check state just before hangup
                 const latest = callState.get(callId);
                 if (!latest) return;
                 if (latest.lastNonBotCount === 0) {
@@ -214,10 +202,9 @@ app.post("/api/calling", async (req, res) => {
               } catch (e) {
                 console.log(`[auto-leave] hangup failed callId=${callId} error=${e?.message || e}`);
               }
-            }, 25000); // 25 seconds grace period
+            }, 25000);
           }
         } else {
-          // Humans present -> cancel timer
           if (state.hangupTimer) {
             clearTimeout(state.hangupTimer);
             state.hangupTimer = null;
@@ -230,7 +217,6 @@ app.post("/api/calling", async (req, res) => {
       }
     }
   } catch (e) {
-    // webhook must not fail the request; we already 202’d, just log
     console.log("[webhook] error", e?.message || e);
   }
 });
