@@ -50,7 +50,7 @@ function requireApiKey(req, res, next) {
   next();
 }
 
-const BUILD_TAG = "2026-02-24-clean";
+const BUILD_TAG = "2026-03-01-auto-leave-v1";
 
 // ===== ENV (Azure App Service -> Environment variables) =====
 const TENANT_ID = process.env.TENANT_ID; // GUID
