@@ -61,26 +61,65 @@ app.get("/status", requireApiKey, async (req, res) => {
     if (!isGuid(callId)) return res.status(400).json({ error: "call_id must be a GUID" });
 
     const token = await getGraphToken();
-    const url = `https://graph.microsoft.com/v1.0/communications/calls/${callId}`;
 
-    const r = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } });
+    // 1) Call state
+    const callUrl = `https://graph.microsoft.com/v1.0/communications/calls/${callId}`;
+    const callResp = await axios.get(callUrl, { headers: { Authorization: `Bearer ${token}` } });
+    const callState = callResp.data?.state || null; // establishing / established / terminated
 
-    // normalize to what poller expects
+    // 2) Participants (best-effort)
+    let humanCount = null;
+    try {
+      const partUrl = `https://graph.microsoft.com/v1.0/communications/calls/${callId}/participants`;
+      const partResp = await axios.get(partUrl, { headers: { Authorization: `Bearer ${token}` } });
+      const participants = partResp.data?.value || [];
+
+      // Count humans only (user/guest). Exclude application (the bot).
+      let count = 0;
+      for (const p of participants) {
+        const ident = p?.info?.identity || {};
+        const isApp = !!ident.application;
+        const isHuman = !!(ident.user || ident.guest);
+        if (!isApp && isHuman) count += 1;
+      }
+      humanCount = count;
+    } catch (partErr) {
+      // don't fail /status if participants endpoint fails
+      humanCount = null;
+    }
+
+    // Normalize fields the poller can rely on
+    const ended = callState === "terminated";
+
     return res.json({
       ok: true,
-      azure_status: "running",
-      call_state: r.data?.state || null,  // establishing / established / terminated
-      termination_reason: r.data?.terminationReason || null,
+      azure_status: ended ? "ended" : "running",
+      call_state: callState,
+      termination_reason: callResp.data?.terminationReason || null,
+      human_count: humanCount,          // null if unavailable
+      is_ended: ended,                  // explicit boolean for poller
     });
   } catch (e) {
     const status = e?.response?.status;
 
-    // IMPORTANT: if Graph says call is gone, return 404 (poller will treat as ended)
+    // If Graph says call is gone, return 404 (poller treats as ended)
     if (status === 404) {
-      return res.status(404).json({ ok: false, azure_status: "not_found" });
+      return res.status(404).json({
+        ok: false,
+        azure_status: "not_found",
+        is_ended: true,
+        call_state: "not_found",
+        human_count: 0,
+      });
     }
 
-    return res.status(500).json({ error: e?.response?.data || e.message });
+    // Return structured error so poller can count failures
+    return res.status(502).json({
+      ok: false,
+      azure_status: "error",
+      graph_status: status || null,
+      error: e?.response?.data || e.message,
+    });
   }
 });
 
