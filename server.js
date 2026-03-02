@@ -7,8 +7,13 @@ import { ClientSecretCredential } from "@azure/identity";
 // =====================================================
 
 // callId -> {
-//   createdAt, firstHumanJoinAt, lastHumanSeenAt,
-//   lastNonBotCount, emptySince, hangupTimer
+//   createdAt,
+//   firstHumanJoinAt,
+//   lastHumanSeenAt,
+//   lastNonBotCount,
+//   emptySince,
+//   hangupTimer,
+//   endedAt,
 // }
 const callState = new Map();
 
@@ -21,7 +26,7 @@ const activeCallsByThreadId = new Map();
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
-const BUILD_TAG = "2026-03-02-clean-status-leave-webhook-v1";
+const BUILD_TAG = "2026-03-02-bot-clean-v2";
 
 // =====================================================
 // ENV
@@ -29,6 +34,7 @@ const BUILD_TAG = "2026-03-02-clean-status-leave-webhook-v1";
 const TENANT_ID = process.env.TENANT_ID;
 const CLIENT_ID = process.env.MICROSOFT_APP_ID;
 const CLIENT_SECRET = process.env.MICROSOFT_APP_PASSWORD;
+const API_KEY = process.env.API_KEY;
 
 const CALLING_CALLBACK_URI =
   process.env.CALLING_CALLBACK_URI ||
@@ -39,11 +45,8 @@ const CALLING_CALLBACK_URI =
   if (!TENANT_ID) missing.push("TENANT_ID");
   if (!CLIENT_ID) missing.push("MICROSOFT_APP_ID");
   if (!CLIENT_SECRET) missing.push("MICROSOFT_APP_PASSWORD");
-  if (!process.env.API_KEY) missing.push("API_KEY");
-
-  if (missing.length) {
-    console.warn(`[WARN] Missing env vars: ${missing.join(", ")}.`);
-  }
+  if (!API_KEY) missing.push("API_KEY");
+  if (missing.length) console.warn(`[WARN] Missing env vars: ${missing.join(", ")}`);
 })();
 
 // =====================================================
@@ -51,12 +54,8 @@ const CALLING_CALLBACK_URI =
 // =====================================================
 function requireApiKey(req, res, next) {
   const key = req.header("x-api-key");
-  if (!process.env.API_KEY) {
-    return res.status(500).json({ error: "API_KEY not configured on server" });
-  }
-  if (key !== process.env.API_KEY) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
+  if (!API_KEY) return res.status(500).json({ error: "API_KEY not configured on server" });
+  if (key !== API_KEY) return res.status(401).json({ error: "Unauthorized" });
   next();
 }
 
@@ -71,6 +70,59 @@ async function getGraphToken() {
   const cred = new ClientSecretCredential(TENANT_ID, CLIENT_ID, CLIENT_SECRET);
   const token = await cred.getToken("https://graph.microsoft.com/.default");
   return token.token;
+}
+
+function getCallIdFromNotification(n) {
+  const url = n?.resourceUrl || n?.resource || "";
+  const m = String(url).match(/calls\/([0-9a-fA-F-]{36})/);
+  return m ? m[1] : null;
+}
+
+function countNonBotParticipants(participants) {
+  let count = 0;
+  for (const p of participants || []) {
+    const ident = p?.info?.identity || {};
+    const isApp = !!ident.application;
+
+    const displayName =
+      ident?.user?.displayName ||
+      ident?.guest?.displayName ||
+      ident?.encrypted?.displayName ||
+      ident?.phone?.displayName ||
+      p?.info?.displayName ||
+      null;
+
+    const isHuman = !!(ident.user || ident.guest || displayName);
+    if (!isApp && isHuman) count += 1;
+  }
+  return count;
+}
+
+function cleanupCall(callId) {
+  const st = callState.get(callId);
+  if (st?.hangupTimer) clearTimeout(st.hangupTimer);
+  callState.delete(callId);
+
+  for (const [tId, cId] of activeCallsByThreadId.entries()) {
+    if (cId === callId) {
+      activeCallsByThreadId.delete(tId);
+      break;
+    }
+  }
+}
+
+async function graphHangup(callId) {
+  const token = await getGraphToken();
+  const url = `https://graph.microsoft.com/v1.0/communications/calls/${callId}`;
+  await axios.delete(url, { headers: { Authorization: `Bearer ${token}` } });
+}
+
+async function hangupCall(callId) {
+  // call our own internal endpoint
+  const port = process.env.PORT || 8080;
+  const url = `http://127.0.0.1:${port}/call/${callId}/hangup`;
+  await axios.post(url, null, { headers: { "x-api-key": API_KEY } });
+  console.log(`[auto-leave] hangup requested callId=${callId}`);
 }
 
 // Extract organizer Oid from Teams join URL context param: {"Tid":"...","Oid":"..."}
@@ -102,60 +154,6 @@ async function findOnlineMeeting({ token, organizerUserId, joinWebUrl }) {
   }
 }
 
-function getCallIdFromNotification(n) {
-  const url = n?.resourceUrl || n?.resource || "";
-  const m = String(url).match(/calls\/([0-9a-fA-F-]{36})/);
-  return m ? m[1] : null;
-}
-
-// Count humans from webhook participant payload (resourceData array)
-function countNonBotParticipants(participants) {
-  let count = 0;
-  for (const p of participants || []) {
-    const ident = p?.info?.identity || {};
-    const isApp = !!ident.application;
-
-    // Some payloads have user/guest; some only have displayName somewhere
-    const displayName =
-      ident?.user?.displayName ||
-      ident?.guest?.displayName ||
-      ident?.encrypted?.displayName ||
-      ident?.phone?.displayName ||
-      p?.info?.displayName ||
-      p?.info?.identity?.user?.displayName ||
-      p?.info?.identity?.guest?.displayName ||
-      null;
-
-    const isHuman = !!(ident.user || ident.guest || displayName);
-    if (!isApp && isHuman) count += 1;
-  }
-  return count;
-}
-
-async function hangupCall(callId) {
-  // Call our own protected endpoint internally
-  const port = process.env.PORT || 8080;
-  const url = `http://127.0.0.1:${port}/call/${callId}/hangup`;
-  await axios.post(url, null, { headers: { "x-api-key": process.env.API_KEY } });
-  console.log(`[auto-leave] hangup requested callId=${callId}`);
-}
-
-function cleanupCall(callId) {
-  const st = callState.get(callId);
-  if (st?.hangupTimer) {
-    clearTimeout(st.hangupTimer);
-  }
-  callState.delete(callId);
-
-  // Remove from activeCallsByThreadId if present
-  for (const [tId, cId] of activeCallsByThreadId.entries()) {
-    if (cId === callId) {
-      activeCallsByThreadId.delete(tId);
-      break;
-    }
-  }
-}
-
 // =====================================================
 // Routes
 // =====================================================
@@ -163,27 +161,14 @@ function cleanupCall(callId) {
 // Health
 app.get("/health", (_req, res) => res.json({ ok: true, build: BUILD_TAG }));
 
-// Debug env (safe: don’t print secrets)
-app.get("/debug/env", (_req, res) => {
-  res.json({
-    TENANT_ID: TENANT_ID || null,
-    MICROSOFT_APP_ID: CLIENT_ID ? "SET" : null,
-    MICROSOFT_APP_PASSWORD: CLIENT_SECRET ? "SET" : null,
-    API_KEY: process.env.API_KEY ? "SET" : null,
-    CALLING_CALLBACK_URI,
-    build: BUILD_TAG,
-  });
-});
-
 // Bot Framework messaging endpoint (leave unprotected)
 app.post("/api/messages", (_req, res) => res.sendStatus(200));
 
 /**
- * Calling webhook endpoint (leave unprotected)
- * Graph expects quick ACK. We:
- * - ACK 202 immediately
- * - then process notifications, track participants
- * - auto-leave when humans == 0 for 25s
+ * Calling webhook endpoint (unprotected)
+ * - ACK immediately
+ * - update in-memory participant state
+ * - auto-leave only AFTER at least one human joined once
  */
 app.post("/api/calling", (req, res) => {
   res.sendStatus(202);
@@ -207,11 +192,13 @@ app.post("/api/calling", (req, res) => {
         // Call ended
         if (changeType === "deleted" || n?.resourceData?.state === "terminated") {
           console.log(`[call] ended callId=${callId} changeType=${changeType}`);
+          const st = callState.get(callId);
+          if (st) st.endedAt = Date.now();
           cleanupCall(callId);
           continue;
         }
 
-        // Participants update
+        // Participants update (resourceData is array)
         if (resourceUrl.endsWith("/participants") && Array.isArray(n?.resourceData)) {
           const participants = n.resourceData;
           const nonBotCount = countNonBotParticipants(participants);
@@ -224,6 +211,7 @@ app.post("/api/calling", (req, res) => {
             lastNonBotCount: null,
             emptySince: null,
             hangupTimer: null,
+            endedAt: null,
           };
 
           st.lastNonBotCount = nonBotCount;
@@ -241,29 +229,40 @@ app.post("/api/calling", (req, res) => {
               st.hangupTimer = null;
             }
             st.emptySince = null;
-          } else {
-            // no humans
-            if (!st.emptySince) {
-              st.emptySince = now;
-              console.log(`[auto-leave] no humans left callId=${callId}, starting timer`);
-            }
 
-            if (!st.hangupTimer) {
-              st.hangupTimer = setTimeout(async () => {
-                try {
-                  const latest = callState.get(callId);
-                  if (!latest) return;
+            callState.set(callId, st);
+            console.log(`[participants] callId=${callId} nonBotCount=${nonBotCount}`);
+            continue;
+          }
 
-                  if ((latest.lastNonBotCount ?? 0) === 0) {
-                    await hangupCall(callId);
-                  } else {
-                    console.log(`[auto-leave] humans returned, skipping hangup callId=${callId}`);
-                  }
-                } catch (e) {
-                  console.log(`[auto-leave] hangup failed callId=${callId} error=${e?.message || e}`);
+          // nonBotCount === 0
+          // IMPORTANT: don't auto-leave until at least one human has joined once
+          if (!st.firstHumanJoinAt) {
+            callState.set(callId, st);
+            console.log(`[participants] callId=${callId} nonBotCount=0 (waiting for first human; no auto-leave)`);
+            continue;
+          }
+
+          if (!st.emptySince) {
+            st.emptySince = now;
+            console.log(`[auto-leave] no humans left callId=${callId}, starting timer`);
+          }
+
+          if (!st.hangupTimer) {
+            st.hangupTimer = setTimeout(async () => {
+              try {
+                const latest = callState.get(callId);
+                if (!latest) return;
+
+                if ((latest.lastNonBotCount ?? 0) === 0) {
+                  await hangupCall(callId);
+                } else {
+                  console.log(`[auto-leave] humans returned, skipping hangup callId=${callId}`);
                 }
-              }, 25_000);
-            }
+              } catch (e) {
+                console.log(`[auto-leave] hangup failed callId=${callId} error=${e?.message || e}`);
+              }
+            }, 25_000);
           }
 
           callState.set(callId, st);
@@ -279,91 +278,68 @@ app.post("/api/calling", (req, res) => {
 /**
  * POST /join (protected)
  * Body: { joinWebUrl }
- * Returns: { call: { id, state, ... }, meeting: { threadId, ... } }
  */
 app.post("/join", requireApiKey, async (req, res) => {
   try {
     const { joinWebUrl } = req.body || {};
-    if (!joinWebUrl) {
-      return res.status(400).json({ error: "Missing joinWebUrl (Teams meeting join link)." });
-    }
+    if (!joinWebUrl) return res.status(400).json({ error: "Missing joinWebUrl" });
 
     const organizerUserId = tryExtractOrganizerOid(joinWebUrl);
-    if (!organizerUserId) {
-      return res.status(400).json({ error: "Could not extract organizer Oid from joinWebUrl context." });
-    }
+    if (!organizerUserId) return res.status(400).json({ error: "Could not extract organizer Oid from joinWebUrl" });
 
     const token = await getGraphToken();
-
     const found = await findOnlineMeeting({ token, organizerUserId, joinWebUrl });
     if (!found.meeting) {
       return res.status(404).json({
-        error: "Online meeting not found for organizerUserId + joinWebUrl.",
-        tried: [found.tried],
+        error: "Online meeting not found",
+        tried: found.tried,
         lookupError: found.error || null,
-        organizerUserIdUsed: organizerUserId
       });
     }
 
     const threadId = found.meeting?.chatInfo?.threadId;
-    if (!threadId) {
-      return res.status(400).json({
-        error: "Online meeting found, but chatInfo.threadId is missing.",
-        meetingId: found.meeting?.id
-      });
-    }
+    if (!threadId) return res.status(400).json({ error: "chatInfo.threadId missing" });
 
-    // Duplicate join guard
     if (activeCallsByThreadId.has(threadId)) {
-      return res.status(409).json({
-        error: "Bot already joined this meeting",
-        callId: activeCallsByThreadId.get(threadId),
-        threadId
-      });
+      return res.status(409).json({ error: "Bot already joined this meeting", callId: activeCallsByThreadId.get(threadId) });
     }
 
     const joinMeetingId = found.meeting?.joinMeetingIdSettings?.joinMeetingId;
     const passcode = found.meeting?.joinMeetingIdSettings?.passcode ?? null;
 
     const createCallUrl = "https://graph.microsoft.com/v1.0/communications/calls";
-
     const payload = {
       "@odata.type": "#microsoft.graph.call",
       callbackUri: CALLING_CALLBACK_URI,
       requestedModalities: ["audio"],
       mediaConfig: { "@odata.type": "#microsoft.graph.serviceHostedMediaConfig" },
-      meetingInfo: {
-        "@odata.type": "#microsoft.graph.joinMeetingIdMeetingInfo",
-        joinMeetingId,
-        passcode
-      },
-      tenantId: TENANT_ID
+      meetingInfo: { "@odata.type": "#microsoft.graph.joinMeetingIdMeetingInfo", joinMeetingId, passcode },
+      tenantId: TENANT_ID,
     };
 
     const callResp = await axios.post(createCallUrl, payload, {
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     });
 
-    // Save mapping + init local state
-    activeCallsByThreadId.set(threadId, callResp.data.id);
-    callState.set(callResp.data.id, {
-      createdAt: Date.now(),
-      firstHumanJoinAt: null,
-      lastHumanSeenAt: null,
-      lastNonBotCount: null,
-      emptySince: null,
-      hangupTimer: null,
-    });
+    const callId = callResp.data?.id;
+    if (callId) {
+      activeCallsByThreadId.set(threadId, callId);
+      callState.set(callId, {
+        createdAt: Date.now(),
+        firstHumanJoinAt: null,
+        lastHumanSeenAt: null,
+        lastNonBotCount: null,
+        emptySince: null,
+        hangupTimer: null,
+        endedAt: null,
+      });
+    }
 
-    return res.status(200).json({
+    return res.json({
       ok: true,
       organizerUserIdUsed: organizerUserId,
-      meeting: {
-        id: found.meeting?.id,
-        subject: found.meeting?.subject || null,
-        threadId
-      },
-      call: callResp.data
+      meeting: { id: found.meeting?.id, subject: found.meeting?.subject || null, threadId },
+      call: callResp.data,
     });
   } catch (e) {
     return res.status(500).json({ error: e?.response?.data || e.message });
@@ -372,199 +348,77 @@ app.post("/join", requireApiKey, async (req, res) => {
 
 /**
  * GET /status?call_id=<GUID>  (protected)
- * Poller expects stable fields:
- *   azure_status, call_state, termination_reason, human_count, is_ended
+ * IMPORTANT: DO NOT depend on Graph GET here.
+ * Use webhook memory as truth.
  */
 app.get("/status", requireApiKey, async (req, res) => {
-  try {
-    const callId = req.query.call_id || req.query.bot_job_id || req.query.callId;
-    if (!callId) return res.status(400).json({ error: "Missing call_id" });
-    if (!isGuid(callId)) return res.status(400).json({ error: "call_id must be a GUID" });
+  const callId = req.query.call_id || req.query.bot_job_id || req.query.callId;
+  if (!callId) return res.status(400).json({ error: "Missing call_id" });
+  if (!isGuid(callId)) return res.status(400).json({ error: "call_id must be a GUID" });
 
-    const token = await getGraphToken();
+  const st = callState.get(callId);
 
-    // 1) Call state
-    const callUrl = `https://graph.microsoft.com/v1.0/communications/calls/${callId}`;
-    const callResp = await axios.get(callUrl, { headers: { Authorization: `Bearer ${token}` } });
-    const callStateStr = callResp.data?.state || null; // establishing / established / terminated
-    const ended = callStateStr === "terminated";
-
-    // 2) Participants (best-effort). If it fails, use webhook-cached count if available.
-    let humanCount = null;
-    try {
-      const partUrl = `https://graph.microsoft.com/v1.0/communications/calls/${callId}/participants`;
-      const partResp = await axios.get(partUrl, { headers: { Authorization: `Bearer ${token}` } });
-      const participants = partResp.data?.value || [];
-
-      let count = 0;
-      for (const p of participants) {
-        const ident = p?.info?.identity || {};
-        const isApp = !!ident.application;
-        const isHuman = !!(ident.user || ident.guest);
-        if (!isApp && isHuman) count += 1;
-      }
-      humanCount = count;
-    } catch {
-      const cached = callState.get(callId);
-      if (typeof cached?.lastNonBotCount === "number") humanCount = cached.lastNonBotCount;
-    }
-
-    return res.json({
-      ok: true,
-      azure_status: ended ? "ended" : "running",
-      call_state: callStateStr,
-      termination_reason: callResp.data?.terminationReason || null,
-      human_count: humanCount,
-      is_ended: ended
-    });
-  } catch (e) {
-    const status = e?.response?.status;
-
-    // Graph returns 404 when call already ended / not found
-    if (status === 404) {
-      return res.status(404).json({
-        ok: false,
-        azure_status: "not_found",
-        is_ended: true,
-        call_state: "not_found",
-        human_count: 0
-      });
-    }
-
-    return res.status(502).json({
+  // If we never saw this callId in webhook memory, treat as ended/not_found
+  if (!st) {
+    return res.status(404).json({
       ok: false,
-      azure_status: "error",
-      graph_status: status || null,
-      error: e?.response?.data || e.message
+      azure_status: "not_found",
+      is_ended: true,
+      call_state: "not_found",
+      human_count: 0,
     });
   }
+
+  const humanCount = typeof st.lastNonBotCount === "number" ? st.lastNonBotCount : null;
+
+  return res.json({
+    ok: true,
+    azure_status: "running",
+    call_state: "established", // best-effort; webhook doesn't always tell state
+    termination_reason: null,
+    human_count: humanCount,
+    is_ended: false,
+    first_human_join_at: st.firstHumanJoinAt ? new Date(st.firstHumanJoinAt).toISOString() : null,
+    last_human_seen_at: st.lastHumanSeenAt ? new Date(st.lastHumanSeenAt).toISOString() : null,
+  });
 });
 
 /**
  * POST /leave  (protected)
- * body: { call_id: "<GUID>" }   OR query ?call_id=<GUID>
+ * body: { call_id: "<GUID>" }  OR query ?call_id=<GUID>
+ * This DOES call Graph to hang up.
  */
 app.post("/leave", requireApiKey, async (req, res) => {
+  const callId = req.body?.call_id || req.query.call_id;
+  if (!callId || !isGuid(callId)) return res.status(400).json({ error: "Missing or invalid call_id" });
+
   try {
-    const callId = req.body?.call_id || req.body?.bot_job_id || req.query.call_id;
-    if (!callId || !isGuid(callId)) {
-      return res.status(400).json({ error: "Missing or invalid call_id (GUID)" });
-    }
-
-    const token = await getGraphToken();
-    const url = `https://graph.microsoft.com/v1.0/communications/calls/${callId}`;
-    await axios.delete(url, { headers: { Authorization: `Bearer ${token}` } });
-
-    cleanupCall(callId);
-    return res.json({ ok: true, call_id: callId });
+    await graphHangup(callId);
   } catch (e) {
     const status = e?.response?.status;
-    if (status === 404) {
-      cleanupCall(req.body?.call_id || req.query.call_id);
-      return res.json({ ok: true, call_id: req.body?.call_id || req.query.call_id, already_gone: true });
+    if (status !== 404) {
+      return res.status(500).json({ error: e?.response?.data || e.message });
     }
-    return res.status(500).json({ error: e?.response?.data || e.message });
   }
+
+  cleanupCall(callId);
+  return res.json({ ok: true, call_id: callId });
 });
 
 // Convenience: hangup by path param (protected)
 app.post("/call/:callId/hangup", requireApiKey, async (req, res) => {
+  const callId = req.params.callId;
+  if (!isGuid(callId)) return res.status(400).json({ error: "callId must be a GUID" });
+
   try {
-    const callId = req.params.callId;
-    if (!isGuid(callId)) return res.status(400).json({ error: "callId must be a GUID" });
-
-    const token = await getGraphToken();
-    const url = `https://graph.microsoft.com/v1.0/communications/calls/${callId}`;
-    await axios.delete(url, { headers: { Authorization: `Bearer ${token}` } });
-
-    cleanupCall(callId);
-    return res.json({ ok: true, callId });
-  } catch (e) {
-    return res.status(500).json({ error: e?.response?.data || e.message });
-  }
-});
-
-// Convenience: check call by path param (protected)
-app.get("/call/:callId", requireApiKey, async (req, res) => {
-  try {
-    const callId = req.params.callId;
-    if (!isGuid(callId)) return res.status(400).json({ error: "callId must be a GUID" });
-
-    const token = await getGraphToken();
-    const url = `https://graph.microsoft.com/v1.0/communications/calls/${callId}`;
-    const r = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } });
-
-    return res.json({
-      ok: true,
-      id: r.data?.id,
-      state: r.data?.state,
-      terminationReason: r.data?.terminationReason || null
-    });
+    await graphHangup(callId);
   } catch (e) {
     const status = e?.response?.status;
-    if (status === 404) return res.status(404).json({ ok: true, state: "not_found_or_ended" });
-    return res.status(500).json({ error: e?.response?.data || e.message });
+    if (status !== 404) return res.status(500).json({ error: e?.response?.data || e.message });
   }
-});
 
-// Fetch transcript as VTT (protected)
-app.get("/transcripts", requireApiKey, async (req, res) => {
-  try {
-    const joinWebUrl = req.query.joinWebUrl;
-    if (!joinWebUrl) return res.status(400).json({ error: "Missing joinWebUrl query param" });
-
-    const organizerUserId = tryExtractOrganizerOid(joinWebUrl);
-    if (!organizerUserId) {
-      return res.status(400).json({ error: "Could not extract organizer Oid from joinWebUrl context" });
-    }
-
-    const token = await getGraphToken();
-
-    const found = await findOnlineMeeting({ token, organizerUserId, joinWebUrl });
-    if (!found.meeting) {
-      return res.status(404).json({
-        error: "Online meeting not found",
-        tried: found.tried,
-        lookupError: found.error || null
-      });
-    }
-
-    const meetingId = found.meeting.id;
-
-    // List transcripts
-    const listUrl = `https://graph.microsoft.com/v1.0/users/${organizerUserId}/onlineMeetings/${meetingId}/transcripts`;
-    const listResp = await axios.get(listUrl, { headers: { Authorization: `Bearer ${token}` } });
-
-    const transcripts = listResp.data?.value || [];
-    if (!transcripts.length) {
-      return res.status(404).json({
-        error: "No transcripts found yet. Transcription may not be started or still processing.",
-        meetingId
-      });
-    }
-
-    // Get latest transcript
-    const latest = transcripts
-      .sort((a, b) => (a.createdDateTime || "").localeCompare(b.createdDateTime || ""))
-      .pop();
-
-    const transcriptId = latest.id;
-
-    // Get transcript content (VTT)
-    const contentUrl =
-      `https://graph.microsoft.com/v1.0/users/${organizerUserId}/onlineMeetings/${meetingId}` +
-      `/transcripts/${transcriptId}/content`;
-
-    const contentResp = await axios.get(contentUrl, {
-      headers: { Authorization: `Bearer ${token}`, Accept: "text/vtt" },
-      responseType: "text"
-    });
-
-    res.setHeader("Content-Type", "text/vtt; charset=utf-8");
-    return res.status(200).send(contentResp.data);
-  } catch (e) {
-    return res.status(500).json({ error: e?.response?.data || e.message });
-  }
+  cleanupCall(callId);
+  return res.json({ ok: true, callId });
 });
 
 // =====================================================
