@@ -52,6 +52,38 @@ function requireApiKey(req, res, next) {
 
 const BUILD_TAG = "2026-03-01-auto-leave-v1";
 
+// Status endpoint (protected) — poller calls this
+// GET /status?call_id=<GUID>
+app.get("/status", requireApiKey, async (req, res) => {
+  try {
+    const callId = req.query.call_id;
+    if (!callId) return res.status(400).json({ error: "Missing call_id" });
+    if (!isGuid(callId)) return res.status(400).json({ error: "call_id must be a GUID" });
+
+    const token = await getGraphToken();
+    const url = `https://graph.microsoft.com/v1.0/communications/calls/${callId}`;
+
+    const r = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } });
+
+    // normalize to what poller expects
+    return res.json({
+      ok: true,
+      azure_status: "running",
+      call_state: r.data?.state || null,  // establishing / established / terminated
+      termination_reason: r.data?.terminationReason || null,
+    });
+  } catch (e) {
+    const status = e?.response?.status;
+
+    // IMPORTANT: if Graph says call is gone, return 404 (poller will treat as ended)
+    if (status === 404) {
+      return res.status(404).json({ ok: false, azure_status: "not_found" });
+    }
+
+    return res.status(500).json({ error: e?.response?.data || e.message });
+  }
+});
+
 // ===== ENV (Azure App Service -> Environment variables) =====
 const TENANT_ID = process.env.TENANT_ID; // GUID
 const CLIENT_ID = process.env.MICROSOFT_APP_ID; // App registration (client) ID
@@ -179,6 +211,24 @@ app.post("/leave", requireApiKey, async (req, res) => {
     if (!callId || !isGuid(callId)) {
       return res.status(400).json({ error: "Missing or invalid call_id" });
     }
+
+    const token = await getGraphToken();
+    const url = `https://graph.microsoft.com/v1.0/communications/calls/${callId}`;
+    await axios.delete(url, { headers: { Authorization: `Bearer ${token}` } });
+
+    return res.json({ ok: true, call_id: callId });
+  } catch (e) {
+    return res.status(500).json({ error: e?.response?.data || e.message });
+  }
+});
+
+// Leave endpoint (protected) — poller calls this
+// POST /leave?call_id=<GUID>
+app.post("/leave", requireApiKey, async (req, res) => {
+  try {
+    const callId = req.query.call_id;
+    if (!callId) return res.status(400).json({ error: "Missing call_id" });
+    if (!isGuid(callId)) return res.status(400).json({ error: "call_id must be a GUID" });
 
     const token = await getGraphToken();
     const url = `https://graph.microsoft.com/v1.0/communications/calls/${callId}`;
