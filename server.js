@@ -133,6 +133,45 @@ app.get("/debug/env", (_req, res) => {
   });
 });
 
+// Status endpoint (protected) — poller calls this
+app.get("/status", requireApiKey, async (req, res) => {
+  try {
+    const callId = req.query.call_id || req.query.callId;
+    if (!callId || !isGuid(callId)) {
+      return res.status(400).json({ error: "Missing or invalid call_id" });
+    }
+
+    // Ask Graph for current call state
+    const token = await getGraphToken();
+    const url = `https://graph.microsoft.com/v1.0/communications/calls/${callId}`;
+
+    try {
+      const r = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } });
+
+      // If Graph call exists, return stable structure for poller
+      return res.json({
+        ok: true,
+        call_id: r.data?.id,
+        state: r.data?.state || null,
+        terminationReason: r.data?.terminationReason || null
+      });
+    } catch (e) {
+      const status = e?.response?.status;
+      if (status === 404) {
+        // Call no longer exists → ended
+        return res.status(404).json({
+          ok: true,
+          call_id: callId,
+          state: "not_found_or_ended"
+        });
+      }
+      return res.status(500).json({ error: e?.response?.data || e.message });
+    }
+  } catch (e) {
+    return res.status(500).json({ error: e?.response?.data || e.message });
+  }
+});
+
 // Bot Framework messaging endpoint (leave unprotected)
 app.post("/api/messages", (_req, res) => res.sendStatus(200));
 
