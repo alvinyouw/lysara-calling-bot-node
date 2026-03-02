@@ -328,6 +328,83 @@ app.post("/api/calling", async (req, res) => {
   }
 });
 
+// =============================
+// Poller compatibility routes
+// =============================
+
+// GET /status?call_id=<GUID>&job_id=<optional>
+// - requires x-api-key
+// - returns { ok: true, call_id, state } OR { ok:true, state:"not_found_or_ended" }
+app.get("/status", requireApiKey, async (req, res) => {
+  try {
+    const callId = req.query.call_id || req.query.bot_job_id || req.query.callId;
+    if (!callId || !isGuid(callId)) {
+      return res.status(400).json({
+        error: "Missing or invalid call_id (GUID). Pass ?call_id=<guid>"
+      });
+    }
+
+    const token = await getGraphToken();
+    const url = `https://graph.microsoft.com/v1.0/communications/calls/${callId}`;
+
+    const r = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } });
+
+    return res.json({
+      ok: true,
+      call_id: callId,
+      state: r.data?.state || null,
+      terminationReason: r.data?.terminationReason || null
+    });
+  } catch (e) {
+    const status = e?.response?.status;
+
+    // Graph returns 404 when call already ended or not found
+    if (status === 404) {
+      return res.status(404).json({
+        ok: true,
+        call_id: req.query.call_id || null,
+        state: "not_found_or_ended"
+      });
+    }
+
+    return res.status(500).json({ error: e?.response?.data || e.message });
+  }
+});
+
+// POST /leave  body: { call_id: "<GUID>" }
+// - requires x-api-key
+// - hangs up the call (Graph DELETE /communications/calls/{id})
+app.post("/leave", requireApiKey, async (req, res) => {
+  try {
+    const callId = req.body?.call_id || req.body?.bot_job_id || req.query.call_id;
+    if (!callId || !isGuid(callId)) {
+      return res.status(400).json({
+        error: "Missing or invalid call_id (GUID). Send JSON { call_id: \"<guid>\" }"
+      });
+    }
+
+    const token = await getGraphToken();
+    const url = `https://graph.microsoft.com/v1.0/communications/calls/${callId}`;
+
+    await axios.delete(url, { headers: { Authorization: `Bearer ${token}` } });
+
+    // clean duplicate-join guard if present
+    for (const [tId, cId] of activeCallsByThreadId.entries()) {
+      if (cId === callId) {
+        activeCallsByThreadId.delete(tId);
+        break;
+      }
+    }
+
+    // clean local participant state if you use it
+    callState.delete(callId);
+
+    return res.json({ ok: true, call_id: callId });
+  } catch (e) {
+    return res.status(500).json({ error: e?.response?.data || e.message });
+  }
+});
+
 /**
  * POST /join (protected)
  * Body: { joinWebUrl }
