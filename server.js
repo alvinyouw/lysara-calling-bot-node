@@ -321,6 +321,10 @@ app.post("/api/calling", async (req, res) => {
       // 2) Participants updates
       if (resourceUrl.endsWith("/participants") && Array.isArray(n?.resourceData)) {
         const participants = n.resourceData;
+        console.log(`[participants-raw] callId=${callId} count=${participants.length}`);
+        for (const p of participants) {
+        console.log("[participants-raw] identity=", JSON.stringify(p?.info?.identity || {}, null, 2));
+        }
         const nonBotCount = countNonBotParticipants(participants);
 
         const state =
