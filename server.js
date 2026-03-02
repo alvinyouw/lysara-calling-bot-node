@@ -172,6 +172,24 @@ app.get("/status", requireApiKey, async (req, res) => {
   }
 });
 
+// Leave endpoint (protected) — poller calls this to force bot to leave
+app.post("/leave", requireApiKey, async (req, res) => {
+  try {
+    const callId = req.body?.call_id || req.query?.call_id;
+    if (!callId || !isGuid(callId)) {
+      return res.status(400).json({ error: "Missing or invalid call_id" });
+    }
+
+    const token = await getGraphToken();
+    const url = `https://graph.microsoft.com/v1.0/communications/calls/${callId}`;
+    await axios.delete(url, { headers: { Authorization: `Bearer ${token}` } });
+
+    return res.json({ ok: true, call_id: callId });
+  } catch (e) {
+    return res.status(500).json({ error: e?.response?.data || e.message });
+  }
+});
+
 // Bot Framework messaging endpoint (leave unprotected)
 app.post("/api/messages", (_req, res) => res.sendStatus(200));
 
