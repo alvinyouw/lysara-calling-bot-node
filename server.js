@@ -320,7 +320,11 @@ app.post("/join", requireApiKey, async (req, res) => {
       callbackUri: CALLING_CALLBACK_URI,
       requestedModalities: ["audio"],
       mediaConfig: { "@odata.type": "#microsoft.graph.appHostedMediaConfig" },
-      meetingInfo: { "@odata.type": "#microsoft.graph.joinMeetingIdMeetingInfo", joinMeetingId, passcode },
+      meetingInfo: {
+        "@odata.type": "#microsoft.graph.joinMeetingIdMeetingInfo",
+        joinMeetingId,
+        passcode,
+      },
       tenantId: TENANT_ID,
     };
 
@@ -329,6 +333,7 @@ app.post("/join", requireApiKey, async (req, res) => {
       callResp = await axios.post(createCallUrl, payload, {
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       });
+      console.log("Call created:", callResp?.data?.id);
     } catch (e) {
       console.log("CreateCall failed:", e?.response?.status, e?.response?.data ?? e?.message);
       return res.status(500).json({
