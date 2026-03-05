@@ -2,6 +2,8 @@ import express from "express";
 import axios from "axios";
 import { ClientSecretCredential } from "@azure/identity";
 
+app.use(express.json({ type: "*/*" }));
+
 // =====================================================
 // In-memory state
 // =====================================================
