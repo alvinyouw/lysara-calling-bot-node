@@ -342,7 +342,7 @@ app.post("/join", requireApiKey, async (req, res) => {
         details: e?.response?.data ?? e?.message,
       });
     }
-    
+
     console.log("Call created:", callResp?.data?.id);
 
     // IMPORTANT: respond to the join request
