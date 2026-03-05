@@ -327,6 +327,11 @@ app.post("/join", requireApiKey, async (req, res) => {
     const callResp = await axios.post(createCallUrl, payload, {
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     });
+    console.log("Call created:", callResp.data?.id);
+  } catch (e) {
+    console.log("CreateCall failed:", e?.response?.status, e?.response?.data || e.message);
+    throw e;
+  }
 
     const callId = callResp.data?.id;
     if (callId) {
