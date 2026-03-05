@@ -171,6 +171,12 @@ app.post("/api/messages", (_req, res) => res.sendStatus(200));
  * - auto-leave only AFTER at least one human joined once
  */
 app.post("/api/calling", (req, res) => {
+  // ✅ LOG RECEIPT (keep it fast)
+  console.log("=== /api/calling webhook hit ===", new Date().toISOString());
+  console.log("Headers:", req.headers);
+  console.log("Body:", JSON.stringify(req.body, null, 2));
+
+  // ✅ ACK immediately
   res.sendStatus(202);
 
   setImmediate(async () => {
