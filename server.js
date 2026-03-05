@@ -324,15 +324,24 @@ app.post("/join", requireApiKey, async (req, res) => {
       tenantId: TENANT_ID,
     };
 
-  try {
-    const callResp = await axios.post(createCallUrl, payload, {
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    });
-    console.log("Call created:", callResp.data?.id);
-  } catch (e) {
-    console.log("CreateCall failed:", e?.response?.status, e?.response?.data || e.message);
-    throw e;
-  }
+    let callResp;
+    try {
+      callResp = await axios.post(createCallUrl, payload, {
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      });
+    } catch (e) {
+      console.log("CreateCall failed:", e?.response?.status, e?.response?.data ?? e?.message);
+      return res.status(500).json({
+        error: "CreateCall failed",
+        status: e?.response?.status,
+        details: e?.response?.data ?? e?.message,
+      });
+    }
+
+    console.log("Call created:", callResp?.data?.id);
+
+    // IMPORTANT: respond to the join request
+    return res.status(200).json({ callId: callResp?.data?.id });
 
     const callId = callResp.data?.id;
     if (callId) {
