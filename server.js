@@ -2,8 +2,6 @@ import express from "express";
 import axios from "axios";
 import { ClientSecretCredential } from "@azure/identity";
 
-app.use(express.json({ type: "*/*" }));
-
 // =====================================================
 // In-memory state
 // =====================================================
@@ -26,6 +24,7 @@ const activeCallsByThreadId = new Map();
 // App setup
 // =====================================================
 const app = express();
+app.use(express.json({ type: "*/*" }));
 app.use(express.json({ limit: "2mb" }));
 
 const BUILD_TAG = "2026-03-02-bot-clean-v2";
