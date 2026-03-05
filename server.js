@@ -319,7 +319,7 @@ app.post("/join", requireApiKey, async (req, res) => {
       "@odata.type": "#microsoft.graph.call",
       callbackUri: CALLING_CALLBACK_URI,
       requestedModalities: ["audio"],
-      mediaConfig: { "@odata.type": "#microsoft.graph.appHostedMediaConfig" },
+      mediaConfig: { "@odata.type": "#microsoft.graph.serviceHostedMediaConfig" },
       meetingInfo: {
         "@odata.type": "#microsoft.graph.joinMeetingIdMeetingInfo",
         joinMeetingId,
