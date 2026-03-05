@@ -324,6 +324,7 @@ app.post("/join", requireApiKey, async (req, res) => {
       tenantId: TENANT_ID,
     };
 
+  try {
     const callResp = await axios.post(createCallUrl, payload, {
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     });
